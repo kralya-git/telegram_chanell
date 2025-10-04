@@ -4,6 +4,8 @@ import asyncio
 import nest_asyncio
 import time
 import threading
+import signal
+import sys
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
@@ -29,6 +31,10 @@ logging.basicConfig(
 
 # Глобальный logger для использования во всем приложении
 logger = logging.getLogger(__name__)
+
+# Глобальная переменная для управления ботом
+bot_instance = None
+shutdown_event = threading.Event()
 
 
 class PostBot:
@@ -632,13 +638,30 @@ class WebInterface:
             except Exception as e:
                 return jsonify({'error': str(e)}), 500
 
-    def run_web_server(self, host='127.0.0.1', port=5000):
+    def run_web_server(self, host='0.0.0.0', port=None):
         """Запуск веб-сервера в отдельном потоке"""
+        if port is None:
+            port = int(os.environ.get('PORT', 8080))
         self.app.run(host=host, port=port, debug=False)
 
 
+def signal_handler(signum, frame):
+    """Обработчик сигналов для корректного завершения"""
+    logger.info(f"Получен сигнал {signum}, завершение работы...")
+    shutdown_event.set()
+    if bot_instance:
+        logger.info("Остановка бота...")
+        # Здесь можно добавить логику остановки бота
+    sys.exit(0)
+
+# Регистрируем обработчики сигналов
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
 async def main():
     """Основная функция запуска бота"""
+    global bot_instance
+    
     token = os.getenv('TELEGRAM_BOT_TOKEN')
     if not token:
         logger.error("TELEGRAM_BOT_TOKEN not found in environment variables!")
@@ -647,6 +670,7 @@ async def main():
         return
 
     bot = PostBot(token)
+    bot_instance = bot
 
     # Создаем веб-интерфейс
     web_interface = WebInterface(bot)
@@ -658,10 +682,11 @@ async def main():
     )
     web_thread.start()
 
-    logger.info("🌐 Веб-интерфейс запущен на http://127.0.0.1:5000")
+    port = int(os.environ.get('PORT', 8080))
+    logger.info(f"🌐 Веб-интерфейс запущен на http://0.0.0.0:{port}")
     logger.info("📱 Telegram бот запускается...")
 
-    while True:
+    while not shutdown_event.is_set():
         try:
             logger.info("🚀 Запуск Telegram бота в фоновом режиме...")
             await bot.run_with_retry(max_retries=10)
@@ -673,8 +698,12 @@ async def main():
 
         except Exception as e:
             logger.error(f"❌ Критическая ошибка бота: {e}")
+            if shutdown_event.is_set():
+                break
             logger.info("🔄 Перезапуск через 60 секунд...")
             await asyncio.sleep(60)
+    
+    logger.info("🛑 Бот завершает работу...")
 
 if __name__ == '__main__':
     # With nest_asyncio applied, we can use asyncio.run() normally
