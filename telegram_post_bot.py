@@ -3,10 +3,13 @@ import logging
 import asyncio
 import nest_asyncio
 import time
+import threading
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from telegram.error import Conflict, RetryAfter, TimedOut, BadRequest
 from dotenv import load_dotenv
+from flask import Flask, render_template_string, jsonify
 
 # Apply nest_asyncio to handle event loop issues
 nest_asyncio.apply()
@@ -399,6 +402,241 @@ class PostBot:
                     raise e
 
 
+# Веб-интерфейс для просмотра логов и постов
+class WebInterface:
+    def __init__(self, post_bot):
+        self.post_bot = post_bot
+        self.app = Flask(__name__)
+        self._setup_routes()
+
+    def _setup_routes(self):
+        @self.app.route('/')
+        def index():
+            html_template = """
+            <!DOCTYPE html>
+            <html lang="ru">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Telegram Post Bot - Панель управления</title>
+                <script src="https://cdn.tailwindcss.com"></script>
+            </head>
+            <body class="bg-gray-100 min-h-screen">
+                <div class="container mx-auto px-4 py-8">
+                    <h1 class="text-3xl font-bold text-center mb-8 text-gray-800">
+                        📱 Telegram Post Bot - Панель управления
+                    </h1>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <!-- Логи -->
+                        <div class="bg-white rounded-lg shadow-md p-6">
+                            <h2 class="text-xl font-semibold mb-4 text-gray-700">📋 Последние логи</h2>
+                            <div class="space-y-2 mb-4" id="logsContainer" style="max-height: 400px; overflow-y: auto;">
+                                <div class="text-sm text-gray-600">Загрузка логов...</div>
+                            </div>
+                            <button onclick="refreshLogs()"
+                                class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm">
+                                🔄 Обновить логи
+                            </button>
+                        </div>
+
+                        <!-- Посты -->
+                        <div class="bg-white rounded-lg shadow-md p-6">
+                            <h2 class="text-xl font-semibold mb-4 text-gray-700">📁 Посты</h2>
+                            <div class="space-y-2 mb-4" id="postsContainer" style="max-height: 400px; overflow-y: auto;">
+                                <div class="text-sm text-gray-600">Загрузка постов...</div>
+                            </div>
+                            <button onclick="refreshPosts()"
+                                class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded text-sm">
+                                🔄 Обновить посты
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Детальная информация о посте -->
+                    <div class="mt-6 bg-white rounded-lg shadow-md p-6 hidden" id="postDetail">
+                        <h2 class="text-xl font-semibold mb-4 text-gray-700">📄 Детали поста</h2>
+                        <div id="postContent" class="text-sm text-gray-600">
+                            Выберите пост для просмотра деталей
+                        </div>
+                    </div>
+                </div>
+
+                <script>
+                    function refreshLogs() {
+                        fetch('/api/logs')
+                            .then(response => response.json())
+                            .then(data => {
+                                const container = document.getElementById('logsContainer');
+                                container.innerHTML = '';
+                                data.logs.forEach(log => {
+                                    const div = document.createElement('div');
+                                    div.className = 'text-xs p-2 bg-gray-50 rounded border-l-4 ' +
+                                        (log.level === 'ERROR' ? 'border-red-500' :
+                                         log.level === 'WARNING' ? 'border-yellow-500' : 'border-blue-500');
+                                    div.innerHTML = `
+                                        <div class="font-mono text-gray-500">${log.time}</div>
+                                        <div class="font-semibold text-gray-700">${log.level}</div>
+                                        <div class="text-gray-600">${log.message}</div>
+                                    `;
+                                    container.appendChild(div);
+                                });
+                            })
+                            .catch(error => {
+                                console.error('Ошибка загрузки логов:', error);
+                                document.getElementById('logsContainer').innerHTML =
+                                    '<div class="text-red-500 text-sm">Ошибка загрузки логов</div>';
+                            });
+                    }
+
+                    function refreshPosts() {
+                        fetch('/api/posts')
+                            .then(response => response.json())
+                            .then(data => {
+                                const container = document.getElementById('postsContainer');
+                                container.innerHTML = '';
+                                data.posts.forEach(post => {
+                                    const div = document.createElement('div');
+                                    div.className = 'text-sm p-3 bg-gray-50 rounded cursor-pointer hover:bg-gray-100';
+                                    div.onclick = () => showPostDetail(post.name);
+                                    div.innerHTML = `
+                                        <div class="font-semibold text-gray-700">${post.name}</div>
+                                        <div class="text-gray-500">${post.created}</div>
+                                        <div class="text-gray-600">${post.files_count} файлов</div>
+                                    `;
+                                    container.appendChild(div);
+                                });
+                            })
+                            .catch(error => {
+                                console.error('Ошибка загрузки постов:', error);
+                                document.getElementById('postsContainer').innerHTML =
+                                    '<div class="text-red-500 text-sm">Ошибка загрузки постов</div>';
+                            });
+                    }
+
+                    function showPostDetail(postName) {
+                        fetch(`/api/posts/${postName}`)
+                            .then(response => response.json())
+                            .then(data => {
+                                const detailDiv = document.getElementById('postDetail');
+                                const contentDiv = document.getElementById('postContent');
+
+                                detailDiv.classList.remove('hidden');
+                                contentDiv.innerHTML = `
+                                    <div class="mb-4">
+                                        <h3 class="font-semibold text-lg">${data.name}</h3>
+                                        <p class="text-gray-500">Создано: ${data.created}</p>
+                                    </div>
+                                    <div class="mb-4">
+                                        <h4 class="font-semibold">Содержимое:</h4>
+                                        <pre class="bg-gray-50 p-3 rounded text-xs overflow-x-auto">${data.content}</pre>
+                                    </div>
+                                    ${data.files.length > 0 ? `
+                                    <div>
+                                        <h4 class="font-semibold">Файлы:</h4>
+                                        <ul class="list-disc list-inside">
+                                            ${data.files.map(file => `<li>${file}</li>`).join('')}
+                                        </ul>
+                                    </div>
+                                    ` : ''}
+                                `;
+                            })
+                            .catch(error => {
+                                console.error('Ошибка загрузки деталей поста:', error);
+                                document.getElementById('postContent').innerHTML =
+                                    '<div class="text-red-500 text-sm">Ошибка загрузки деталей поста</div>';
+                            });
+                    }
+
+                    // Автообновление каждые 30 секунд
+                    setInterval(() => {
+                        refreshLogs();
+                        refreshPosts();
+                    }, 30000);
+
+                    // Первоначальная загрузка
+                    refreshLogs();
+                    refreshPosts();
+                </script>
+            </body>
+            </html>
+            """
+            return render_template_string(html_template)
+
+        @self.app.route('/api/logs')
+        def get_logs():
+            try:
+                logs = []
+                if os.path.exists('bot.log'):
+                    with open('bot.log', 'r', encoding='utf-8') as f:
+                        lines = f.readlines()
+                        # Берем последние 50 строк
+                        for line in lines[-50:]:
+                            parts = line.strip().split(' - ')
+                            if len(parts) >= 4:
+                                time_part = parts[0] + ' ' + parts[1]
+                                level = parts[2]
+                                message = ' - '.join(parts[3:])
+                                logs.append({
+                                    'time': time_part,
+                                    'level': level,
+                                    'message': message
+                                })
+                return jsonify({'logs': logs})
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
+
+        @self.app.route('/api/posts')
+        def get_posts():
+            try:
+                posts = []
+                if os.path.exists(self.post_bot.posts_dir):
+                    for item in os.listdir(self.post_bot.posts_dir):
+                        post_path = os.path.join(self.post_bot.posts_dir, item)
+                        if os.path.isdir(post_path) and item.startswith('Пост_'):
+                            created_time = datetime.fromtimestamp(os.path.getctime(post_path))
+                            files = [f for f in os.listdir(post_path) if os.path.isfile(os.path.join(post_path, f))]
+                            posts.append({
+                                'name': item,
+                                'created': created_time.strftime('%Y-%m-%d %H:%M:%S'),
+                                'files_count': len(files)
+                            })
+                # Сортируем по времени создания (новые первыми)
+                posts.sort(key=lambda x: x['created'], reverse=True)
+                return jsonify({'posts': posts})
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
+
+        @self.app.route('/api/posts/<post_name>')
+        def get_post_detail(post_name):
+            try:
+                post_path = os.path.join(self.post_bot.posts_dir, post_name)
+                if not os.path.exists(post_path):
+                    return jsonify({'error': 'Пост не найден'}), 404
+
+                content = ''
+                content_file = os.path.join(post_path, 'content.txt')
+                if os.path.exists(content_file):
+                    with open(content_file, 'r', encoding='utf-8') as f:
+                        content = f.read()
+
+                files = [f for f in os.listdir(post_path) if os.path.isfile(os.path.join(post_path, f))]
+                created_time = datetime.fromtimestamp(os.path.getctime(post_path))
+
+                return jsonify({
+                    'name': post_name,
+                    'created': created_time.strftime('%Y-%m-%d %H:%M:%S'),
+                    'content': content,
+                    'files': files
+                })
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
+
+    def run_web_server(self, host='127.0.0.1', port=5000):
+        """Запуск веб-сервера в отдельном потоке"""
+        self.app.run(host=host, port=port, debug=False)
+
+
 async def main():
     """Основная функция запуска бота"""
     token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -409,6 +647,19 @@ async def main():
         return
 
     bot = PostBot(token)
+
+    # Создаем веб-интерфейс
+    web_interface = WebInterface(bot)
+
+    # Запускаем веб-сервер в отдельном потоке
+    web_thread = threading.Thread(
+        target=web_interface.run_web_server,
+        daemon=True
+    )
+    web_thread.start()
+
+    logger.info("🌐 Веб-интерфейс запущен на http://127.0.0.1:5000")
+    logger.info("📱 Telegram бот запускается...")
 
     while True:
         try:
