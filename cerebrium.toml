@@ -1,3 +1,7 @@
+[deployment]
+name = "telegram-post-bot"
+description = "Telegram bot for post management"
+
 [cerebrium.runtime.custom]
 entrypoint = "python telegram_post_bot.py"
 port = 8080
